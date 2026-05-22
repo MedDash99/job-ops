@@ -6,6 +6,7 @@ import type {
   LatexResumeEntry,
   LatexResumeInterestItem,
   LatexResumeLanguageItem,
+  LatexResumeOrderedSectionKey,
   LatexResumePicture,
   LatexResumeProfileItem,
   LatexResumeSectionTitles,
@@ -87,6 +88,21 @@ const LATEX_RESUME_SECTION_TITLES: Record<
     references: "Referencias",
   },
 };
+
+const ORDERABLE_SECTION_KEYS = [
+  "profiles",
+  "experience",
+  "education",
+  "projects",
+  "skills",
+  "languages",
+  "interests",
+  "awards",
+  "certifications",
+  "publications",
+  "volunteer",
+  "references",
+] as const satisfies readonly LatexResumeOrderedSectionKey[];
 
 function asRecord(value: unknown): RecordLike | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -205,6 +221,37 @@ function getCustomFieldsTitle(
 ): string {
   const basics = (asRecord(resumeJson.basics) ?? {}) as RecordLike;
   return toText(basics.customFieldsTitle).trim() || titles.customFields;
+}
+
+function getOrderedSectionKeys(
+  resumeJson: RecordLike,
+): LatexResumeOrderedSectionKey[] {
+  const metadata = asRecord(resumeJson.metadata);
+  const layout = asRecord(metadata?.layout);
+  const pages = asArray(layout?.pages);
+  const firstPage = asRecord(pages[0]);
+  const mainSections = asArray(firstPage?.main);
+
+  const order: LatexResumeOrderedSectionKey[] = [];
+  const allowed = new Set<LatexResumeOrderedSectionKey>(ORDERABLE_SECTION_KEYS);
+
+  for (const key of mainSections) {
+    if (
+      typeof key === "string" &&
+      allowed.has(key as LatexResumeOrderedSectionKey) &&
+      !order.includes(key as LatexResumeOrderedSectionKey)
+    ) {
+      order.push(key as LatexResumeOrderedSectionKey);
+    }
+  }
+
+  for (const key of ORDERABLE_SECTION_KEYS) {
+    if (!order.includes(key)) {
+      order.push(key);
+    }
+  }
+
+  return order;
 }
 
 function buildPicture(resumeJson: RecordLike): LatexResumePicture | null {
@@ -454,6 +501,7 @@ export function normalizeResumeJsonToLatexDocument(
     publications: buildPublicationEntries(record),
     volunteer: buildVolunteerEntries(record),
     references: buildReferenceEntries(record),
+    sectionOrder: getOrderedSectionKeys(record),
     sectionTitles: {
       profiles: getSectionTitle(record, "profiles", titles),
       summary: getSectionTitle(record, "summary", titles),
@@ -471,4 +519,11 @@ export function normalizeResumeJsonToLatexDocument(
       references: getSectionTitle(record, "references", titles),
     },
   };
+}
+
+export function buildResumeRenderDocument(
+  resumeJson: Record<string, unknown>,
+  options: NormalizeResumeJsonToLatexDocumentOptions = {},
+): LatexResumeDocument {
+  return normalizeResumeJsonToLatexDocument(resumeJson, options);
 }

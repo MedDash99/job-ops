@@ -15,6 +15,7 @@ import type {
   LatexResumeEntry,
   LatexResumeInterestItem,
   LatexResumeLanguageItem,
+  LatexResumeOrderedSectionKey,
   ResumeRenderer,
 } from "./types";
 
@@ -291,6 +292,82 @@ function renderLocationBlock(document: LatexResumeDocument): string {
   return `\\begin{center}\\small ${escapeForCommand(document.location)}\\end{center}\n`;
 }
 
+function renderOrderedCoreSections(
+  document: LatexResumeDocument,
+  titles: ReturnType<typeof getLatexResumeSectionTitles>,
+): string[] {
+  const sectionOrder = document.sectionOrder ?? [
+    "profiles",
+    "experience",
+    "education",
+    "projects",
+    "skills",
+    "languages",
+    "interests",
+    "awards",
+    "certifications",
+    "publications",
+    "volunteer",
+    "references",
+  ];
+  const builders: Record<LatexResumeOrderedSectionKey, () => string> = {
+    profiles: () => renderProfilesSection(document),
+    experience: () =>
+      renderEntrySection({
+        title: titles.experience,
+        entries: document.experience,
+        kind: "subheading",
+      }),
+    education: () =>
+      renderEntrySection({
+        title: titles.education,
+        entries: document.education,
+        kind: "subheading",
+      }),
+    projects: () =>
+      renderEntrySection({
+        title: titles.projects,
+        entries: document.projects,
+        kind: "project",
+      }),
+    skills: () => renderSkillsSection(document),
+    languages: () => renderLanguagesSection(document),
+    interests: () => renderInterestsSection(document),
+    awards: () =>
+      renderEntrySection({
+        title: titles.awards,
+        entries: document.awards,
+        kind: "subheading",
+      }),
+    certifications: () =>
+      renderEntrySection({
+        title: titles.certifications,
+        entries: document.certifications,
+        kind: "subheading",
+      }),
+    publications: () =>
+      renderEntrySection({
+        title: titles.publications,
+        entries: document.publications,
+        kind: "subheading",
+      }),
+    volunteer: () =>
+      renderEntrySection({
+        title: titles.volunteer,
+        entries: document.volunteer,
+        kind: "subheading",
+      }),
+    references: () =>
+      renderEntrySection({
+        title: titles.references,
+        entries: document.references,
+        kind: "subheading",
+      }),
+  };
+
+  return sectionOrder.map((key) => builders[key]());
+}
+
 async function loadTemplate(): Promise<string> {
   return await readFile(TEMPLATE_PATH, "utf8");
 }
@@ -309,51 +386,8 @@ export function buildLatexDocument(
       : "";
   const body = [
     renderSummarySection(document),
-    renderProfilesSection(document),
     renderCustomFieldsSection(document),
-    renderEntrySection({
-      title: titles.experience,
-      entries: document.experience,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.education,
-      entries: document.education,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.projects,
-      entries: document.projects,
-      kind: "project",
-    }),
-    renderSkillsSection(document),
-    renderLanguagesSection(document),
-    renderInterestsSection(document),
-    renderEntrySection({
-      title: titles.awards,
-      entries: document.awards,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.certifications,
-      entries: document.certifications,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.publications,
-      entries: document.publications,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.volunteer,
-      entries: document.volunteer,
-      kind: "subheading",
-    }),
-    renderEntrySection({
-      title: titles.references,
-      entries: document.references,
-      kind: "subheading",
-    }),
+    ...renderOrderedCoreSections(document, titles),
   ]
     .filter(Boolean)
     .join("\n");

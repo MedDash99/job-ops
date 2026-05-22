@@ -10,9 +10,9 @@ import {
   readLatexTemplate,
   renderLatexPdf,
 } from "./latex";
-import type { LatexResumeDocument } from "./types";
+import type { ResumeRenderDocument } from "./types";
 
-const baseDocument: LatexResumeDocument = {
+const baseDocument: ResumeRenderDocument = {
   name: "Jane Doe",
   headline: "Senior Software Engineer",
   location: "London, UK",
@@ -149,6 +149,39 @@ describe("latex resume renderer", () => {
     expect(latex).toContain("\\section{Educación}");
     expect(latex).toContain("\\section{Proyectos}");
     expect(latex).toContain("\\section{Habilidades técnicas}");
+  });
+
+  it("respects custom core section ordering", () => {
+    const latex = buildLatexDocument(
+      {
+        ...baseDocument,
+        education: [
+          {
+            title: "University",
+            subtitle: "MSc",
+            date: "2020",
+            bullets: ["Studied distributed systems"],
+          },
+        ],
+        projects: [
+          {
+            title: "Platform",
+            subtitle: "TypeScript",
+            date: "2024",
+            bullets: ["Built deployment tooling"],
+          },
+        ],
+        sectionOrder: ["skills", "projects", "experience", "education"],
+      },
+      "__BODY__",
+    );
+
+    expect(latex.indexOf("\\section{Technical Skills}")).toBeLessThan(
+      latex.indexOf("\\section{Projects}"),
+    );
+    expect(latex.indexOf("\\section{Projects}")).toBeLessThan(
+      latex.indexOf("\\section{Experience}"),
+    );
   });
 
   it("renders the newly supported sections and picture block", () => {
