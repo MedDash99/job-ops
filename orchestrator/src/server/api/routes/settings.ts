@@ -19,6 +19,7 @@ import {
   getCodexDeviceAuthSnapshot,
   startCodexDeviceAuth,
 } from "@server/services/llm/codex/login";
+import { resolveLlmApiKey } from "@server/services/llm/credentials";
 import { LlmService } from "@server/services/llm/service";
 import { clearProfileCache } from "@server/services/profile";
 import {
@@ -222,12 +223,11 @@ async function resolveLlmConfig(input: {
 
   return {
     provider,
-    apiKey:
-      input.apiKey?.trim() ||
-      storedPurposeApiKey ||
-      storedApiKey?.trim() ||
-      getOriginalEnvValue("LLM_API_KEY")?.trim() ||
-      null,
+    apiKey: resolveLlmApiKey({
+      storedApiKey: input.apiKey ?? storedApiKey,
+      purposeApiKey: storedPurposeApiKey,
+      provider,
+    }),
     baseUrl,
   };
 }
