@@ -28,6 +28,67 @@ import { discoverWatchlistJobsForPipeline } from "./watchlist-jobs";
 
 const DISCOVERY_CONCURRENCY = 3;
 
+function getPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+// Hard per-source ceiling for in-process discovery extractors. Mirrors the
+// Watchlist per-source guard (`withWatchlistSourceTimeout`) so a single hung
+// source can't stall the whole run and freeze the orchestrator. Generous by
+// default so legitimate multi-term crawls with detail enrichment aren't cut
+// short; override via env for slower deployments.
+const DISCOVERY_SOURCE_TIMEOUT_MS = getPositiveIntEnv(
+  "DISCOVERY_SOURCE_TIMEOUT_MS",
+  10 * 60 * 1000,
+);
+
+export class DiscoverySourceTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Discovery source timed out after ${timeoutMs}ms`);
+    this.name = "DiscoverySourceTimeoutError";
+  }
+}
+
+/**
+ * Race an extractor run against a hard timeout. Unlike a cooperative
+ * `shouldCancel` poll, this resolves the race even when the extractor never
+ * observes cancellation, letting discovery abandon the source and move on.
+ * On timeout the provided `AbortSignal` is aborted and `hasTimedOut()` flips
+ * to `true` so network-aware / polling extractors can still stop themselves.
+ */
+export async function withDiscoverySourceTimeout<T>(
+  timeoutMs: number,
+  callback: (signal: AbortSignal, hasTimedOut: () => boolean) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(new DiscoverySourceTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+
+  // Start the work eagerly and attach a no-op catch so that if the timeout
+  // wins the race, a later rejection from the abandoned source doesn't surface
+  // as an unhandled promise rejection.
+  const work = callback(controller.signal, () => timedOut);
+  work.catch(() => {});
+
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 type DiscoveryTaskResult = {
   discoveredJobs: CreateJobInput[];
   sourceErrors: string[];
@@ -253,45 +314,73 @@ export async function discoverJobsStep(args: {
           ),
         ) as Record<string, string | undefined>;
 
-        const result = await manifest.run({
-          source: grouped.sources[0],
-          selectedSources: grouped.sources,
-          settings: filteredSettings,
-          searchTerms,
-          selectedCountry: getLegacyLocationSelection(locationIntent),
-          locationIntent,
-          sourceLocationPlan: getSourceLocationPlan(
-            grouped.sources[0] as CrawlSource,
-            locationIntent,
-            registry.locationCapabilitiesBySource?.[
-              grouped.sources[0] as ExtractorSourceId
-            ],
-          ),
-          getExistingJobUrls,
-          shouldCancel: args.shouldCancel,
-          onProgress: (event) => {
-            progressHelpers.crawlingUpdate({
-              source: manifest.id,
-              termsProcessed: event.termsProcessed,
-              termsTotal: event.termsTotal,
-              listPagesProcessed: event.listPagesProcessed,
-              listPagesTotal: event.listPagesTotal,
-              jobCardsFound: event.jobCardsFound,
-              jobPagesEnqueued: event.jobPagesEnqueued,
-              jobPagesSkipped: event.jobPagesSkipped,
-              jobPagesProcessed: event.jobPagesProcessed,
-              phase: event.phase,
-              currentUrl: event.currentUrl,
-            });
+        let result: Awaited<ReturnType<typeof manifest.run>>;
+        try {
+          result = await withDiscoverySourceTimeout(
+            DISCOVERY_SOURCE_TIMEOUT_MS,
+            (signal, hasTimedOut) =>
+              manifest.run({
+                source: grouped.sources[0],
+                selectedSources: grouped.sources,
+                settings: filteredSettings,
+                searchTerms,
+                selectedCountry: getLegacyLocationSelection(locationIntent),
+                locationIntent,
+                sourceLocationPlan: getSourceLocationPlan(
+                  grouped.sources[0] as CrawlSource,
+                  locationIntent,
+                  registry.locationCapabilitiesBySource?.[
+                    grouped.sources[0] as ExtractorSourceId
+                  ],
+                ),
+                getExistingJobUrls,
+                signal,
+                // Combine caller cancellation with the timeout so extractors
+                // that do poll shouldCancel stop promptly on either.
+                shouldCancel: () =>
+                  hasTimedOut() || (args.shouldCancel?.() ?? false),
+                onProgress: (event) => {
+                  progressHelpers.crawlingUpdate({
+                    source: manifest.id,
+                    termsProcessed: event.termsProcessed,
+                    termsTotal: event.termsTotal,
+                    listPagesProcessed: event.listPagesProcessed,
+                    listPagesTotal: event.listPagesTotal,
+                    jobCardsFound: event.jobCardsFound,
+                    jobPagesEnqueued: event.jobPagesEnqueued,
+                    jobPagesSkipped: event.jobPagesSkipped,
+                    jobPagesProcessed: event.jobPagesProcessed,
+                    phase: event.phase,
+                    currentUrl: event.currentUrl,
+                  });
 
-            if (event.detail) {
-              updateProgress({
-                step: "crawling",
-                detail: event.detail,
-              });
-            }
-          },
-        });
+                  if (event.detail) {
+                    updateProgress({
+                      step: "crawling",
+                      detail: event.detail,
+                    });
+                  }
+                },
+              }),
+          );
+        } catch (error) {
+          if (error instanceof DiscoverySourceTimeoutError) {
+            logger.warn("Discovery source timed out; abandoning source", {
+              step: "discover-jobs",
+              source: manifest.id,
+              sources: grouped.sources,
+              timeoutMs: error.timeoutMs,
+            });
+            return {
+              discoveredJobs: [],
+              sourceErrors: [
+                `${manifest.displayName || manifest.id}: timed out after ${error.timeoutMs}ms (sources: ${grouped.sources.join(",")})`,
+              ],
+              fatal: true,
+            };
+          }
+          throw error;
+        }
 
         if (!result.success) {
           return {

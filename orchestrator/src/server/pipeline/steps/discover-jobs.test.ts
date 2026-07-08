@@ -1137,4 +1137,76 @@ describe("discoverJobsStep", () => {
       "https://example.com/existing",
     ]);
   });
+
+  it("abandons a hung source on per-source timeout and keeps others (#1)", async () => {
+    vi.useFakeTimers();
+    try {
+      const settingsRepo = await import("@server/repositories/settings");
+      const registryModule = await import("@server/extractors/registry");
+
+      // Never resolves and never observes shouldCancel — simulates an
+      // in-process extractor stalled during detail enrichment.
+      const hungManifest = {
+        id: "startupjobs",
+        displayName: "Startup Jobs",
+        providesSources: ["startupjobs"],
+        run: vi.fn(
+          () => new Promise(() => {}) as Promise<{ success: boolean }>,
+        ),
+      };
+      const healthyManifest = {
+        id: "jobspy",
+        displayName: "JobSpy",
+        providesSources: ["linkedin"],
+        run: vi.fn().mockResolvedValue({
+          success: true,
+          jobs: [
+            {
+              source: "linkedin",
+              title: "Engineer",
+              employer: "Contoso",
+              jobUrl: "https://example.com/job",
+              location: "London, United Kingdom",
+            },
+          ],
+        }),
+      };
+
+      vi.mocked(settingsRepo.getAllSettings).mockResolvedValue({
+        searchTerms: JSON.stringify(["engineer"]),
+        jobspyCountryIndeed: "united kingdom",
+      } as any);
+      vi.mocked(registryModule.getExtractorRegistry).mockResolvedValue({
+        manifests: new Map([
+          ["startupjobs", hungManifest as any],
+          ["jobspy", healthyManifest as any],
+        ]),
+        manifestBySource: new Map([
+          ["startupjobs", hungManifest as any],
+          ["linkedin", healthyManifest as any],
+        ]),
+        availableSources: ["startupjobs", "linkedin"],
+      } as any);
+
+      const resultPromise = discoverJobsStep({
+        mergedConfig: {
+          ...baseConfig,
+          sources: ["startupjobs", "linkedin"],
+        },
+      });
+
+      // Advance past the default per-source timeout so the hung source is
+      // abandoned; the healthy source's jobs must still come through.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      const result = await resultPromise;
+
+      expect(result.discoveredJobs).toHaveLength(1);
+      expect(result.discoveredJobs[0]?.employer).toBe("Contoso");
+      expect(result.sourceErrors).toEqual([
+        expect.stringContaining("Startup Jobs: timed out after"),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
