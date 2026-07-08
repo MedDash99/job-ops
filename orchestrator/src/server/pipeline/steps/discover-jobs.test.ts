@@ -3,7 +3,7 @@ import type { PipelineConfig } from "@shared/types";
 import type { ExtractorRuntimeContext } from "@shared/types/extractors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getProgress, resetProgress, subscribeToProgress } from "../progress";
-import { discoverJobsStep } from "./discover-jobs";
+import { DISCOVERY_SOURCE_TIMEOUT_MS, discoverJobsStep } from "./discover-jobs";
 
 vi.mock("@server/repositories/settings", () => ({
   getAllSettings: vi.fn(),
@@ -1195,9 +1195,9 @@ describe("discoverJobsStep", () => {
         },
       });
 
-      // Advance past the default per-source timeout so the hung source is
-      // abandoned; the healthy source's jobs must still come through.
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1);
+      // Advance past the per-source timeout so the hung source is abandoned;
+      // the healthy source's jobs must still come through.
+      await vi.advanceTimersByTimeAsync(DISCOVERY_SOURCE_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
       expect(result.discoveredJobs).toHaveLength(1);

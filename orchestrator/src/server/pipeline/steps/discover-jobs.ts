@@ -41,7 +41,7 @@ function getPositiveIntEnv(name: string, fallback: number): number {
 // source can't stall the whole run and freeze the orchestrator. Generous by
 // default so legitimate multi-term crawls with detail enrichment aren't cut
 // short; override via env for slower deployments.
-const DISCOVERY_SOURCE_TIMEOUT_MS = getPositiveIntEnv(
+export const DISCOVERY_SOURCE_TIMEOUT_MS = getPositiveIntEnv(
   "DISCOVERY_SOURCE_TIMEOUT_MS",
   10 * 60 * 1000,
 );
@@ -68,21 +68,22 @@ export async function withDiscoverySourceTimeout<T>(
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-      reject(new DiscoverySourceTimeoutError(timeoutMs));
-    }, timeoutMs);
-  });
-
-  // Start the work eagerly and attach a no-op catch so that if the timeout
-  // wins the race, a later rejection from the abandoned source doesn't surface
-  // as an unhandled promise rejection.
-  const work = callback(controller.signal, () => timedOut);
-  work.catch(() => {});
-
   try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new DiscoverySourceTimeoutError(timeoutMs));
+      }, timeoutMs);
+    });
+
+    // Start the work and attach a no-op catch so that if the timeout wins the
+    // race, a later rejection from the abandoned source doesn't surface as an
+    // unhandled promise rejection. Kept inside the try so a synchronous throw
+    // from `callback` still clears the timer via `finally`.
+    const work = callback(controller.signal, () => timedOut);
+    work.catch(() => {});
+
     return await Promise.race([work, timeoutPromise]);
   } finally {
     if (timer) clearTimeout(timer);
