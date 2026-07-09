@@ -38,6 +38,10 @@ export interface ExtractorRuntimeContext {
   sourceLocationPlan?: SourceLocationPlan;
   getExistingJobUrls?: () => Promise<string[]>;
   shouldCancel?: () => boolean;
+  /** Aborted when the pipeline abandons this source (e.g. a per-source
+   *  discovery timeout fires). Network-aware extractors should forward this
+   *  to their fetch/HTTP calls so an async hang can be interrupted. */
+  signal?: AbortSignal;
   onProgress?: (event: ExtractorProgressEvent) => void;
 }
 
