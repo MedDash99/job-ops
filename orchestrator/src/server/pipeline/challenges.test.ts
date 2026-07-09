@@ -60,6 +60,7 @@ describe.sequential("pipeline challenge handling", () => {
     const { closeDb } = await import("../db/index");
     closeDb();
     await rm(tempDir, { recursive: true, force: true });
+    delete process.env.CHALLENGE_PAUSE_TIMEOUT_MS;
   });
 
   it("fails loudly when a solved challenge immediately reappears with no jobs", async () => {
@@ -111,6 +112,44 @@ describe.sequential("pipeline challenge handling", () => {
           "still returned a Cloudflare challenge after the solve step",
         ),
       }),
+    );
+  });
+
+  it("abandons the source and continues when the challenge solve deadline passes", async () => {
+    // Short deadline so the pause fires quickly instead of blocking forever.
+    process.env.CHALLENGE_PAUSE_TIMEOUT_MS = "50";
+
+    const pipeline = await import("./orchestrator");
+    const steps = await import("./steps");
+
+    const runPromise = pipeline.runPipeline({
+      sources: ["gradcracker"],
+      locationIntent: {
+        selectedCountry: "united kingdom",
+        country: "united kingdom",
+        cityLocations: [],
+        workplaceTypes: [],
+        geoScope: "selected_only",
+        searchScope: "selected_only",
+        matchStrictness: "flexible",
+      },
+    });
+
+    // The pipeline pauses on the challenge...
+    await vi.waitFor(() => {
+      expect(pipeline.getPendingChallenges()).toHaveLength(1);
+    });
+
+    // ...but we never solve it. Once the deadline passes the run continues.
+    const result = await runPromise;
+
+    // Discovery ran once and was NOT re-run (no solve happened).
+    expect(vi.mocked(steps.discoverJobsStep)).toHaveBeenCalledTimes(1);
+    // The pipeline proceeded past the abandoned challenge instead of hanging.
+    expect(vi.mocked(steps.importJobsStep)).toHaveBeenCalledTimes(1);
+    expect(pipeline.getPendingChallenges()).toHaveLength(0);
+    expect(result).toEqual(
+      expect.objectContaining({ success: true, jobsDiscovered: 0 }),
     );
   });
 });

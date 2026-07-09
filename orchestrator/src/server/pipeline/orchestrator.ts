@@ -73,6 +73,25 @@ const DEFAULT_CONFIG: PipelineConfig = {
   enableAutoTailoring: true,
 };
 
+function getPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+// How long the pipeline waits for a human to solve a Cloudflare challenge
+// before abandoning the challenged source(s) and continuing with whatever else
+// was discovered. Without this deadline the pause blocks forever (until a
+// server restart) whenever a challenge can't be solved — e.g. the headed
+// solver runs but fails to persist a reusable clearance cookie. Generous by
+// default so an attentive user has time to solve; override via env.
+const CHALLENGE_PAUSE_TIMEOUT_MS = getPositiveIntEnv(
+  "CHALLENGE_PAUSE_TIMEOUT_MS",
+  15 * 60 * 1000,
+);
+
 function parseProjectIdsCsv(value: string | null | undefined): string[] {
   if (!value) return [];
   const seen = new Set<string>();
@@ -357,65 +376,98 @@ export async function runPipeline(
 
         progressHelpers.challengeRequired(pendingChallenges);
 
-        // Block until all challenges are resolved by the solve-challenge API.
-        // The Promise is resolved by `resolvePipelineChallenge()`, which is
-        // called from the POST /api/pipeline/solve-challenge endpoint (4d).
-        // Cancellation still works: the cancel endpoint sets cancelRequestedAt,
-        // and ensureNotCancelled() fires after the Promise resolves.
+        // Block until all challenges are resolved by the solve-challenge API,
+        // OR the solve deadline passes. The Promise is resolved by
+        // `resolvePipelineChallenge()` (called from POST
+        // /api/pipeline/solve-challenge) with `false`, or by the timeout with
+        // `true`. Without the deadline an unsolvable challenge (e.g. the solver
+        // never persists a reusable clearance cookie) would hang the pipeline
+        // forever. Cancellation still works: the cancel endpoint sets
+        // cancelRequestedAt, and ensureNotCancelled() fires after we unblock.
         const challengedSources = pendingChallenges.flatMap((c) => c.sources);
 
-        await new Promise<void>((resolve) => {
+        const challengeTimedOut = await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            resolve(true);
+          }, CHALLENGE_PAUSE_TIMEOUT_MS);
           tenantState.activeChallengeState = {
             challenges: new Map(
               pendingChallenges.map((c) => [c.extractorId, c]),
             ),
-            resolve,
+            resolve: () => {
+              clearTimeout(timer);
+              resolve(false);
+            },
           };
         });
         tenantState.activeChallengeState = null;
 
         ensureNotCancelled(scopeKey);
 
-        // Re-run only the extractors that had challenges
-        pipelineLogger.info("Challenges resolved, re-running extractors", {
-          sources: challengedSources,
-        });
+        if (challengeTimedOut) {
+          // Abandon the unsolved source(s) and continue with whatever else was
+          // discovered, rather than hanging indefinitely on the pause.
+          const challengeNames = pendingChallenges
+            .map((c) => c.extractorName || c.extractorId)
+            .join(", ");
+          const timeoutMessage = `${challengeNames}: Cloudflare challenge not solved within ${Math.round(
+            CHALLENGE_PAUSE_TIMEOUT_MS / 1000,
+          )}s — abandoning source(s) and continuing.`;
 
-        const retryConfig = { ...mergedConfig, sources: challengedSources };
-        const retryResult = await discoverJobsStep({
-          mergedConfig: retryConfig,
-          includeWatchlist: false,
-          shouldCancel: () =>
-            getPipelineState(scopeKey).cancelRequestedAt !== null,
-        });
+          pipelineLogger.warn(
+            "Challenge pause timed out; abandoning challenged sources",
+            {
+              challengedSources,
+              timeoutMs: CHALLENGE_PAUSE_TIMEOUT_MS,
+            },
+          );
 
-        discoveredJobs = [...discoveredJobs, ...retryResult.discoveredJobs];
-        sourceErrors = [...sourceErrors, ...retryResult.sourceErrors];
-        pendingChallenges = retryResult.pendingChallenges;
-
-        // If the retry itself hits challenges again (e.g. no reusable cookie was
-        // persisted, or the cookie was rejected), keep partial results only when
-        // something useful was discovered. Otherwise stop loudly instead of
-        // presenting a successful zero-job run.
-        if (retryResult.pendingChallenges.length > 0) {
-          const message = buildRepeatedChallengeMessage({
-            challenges: retryResult.pendingChallenges,
-            sourceErrors: retryResult.sourceErrors,
+          sourceErrors = [...sourceErrors, timeoutMessage];
+          pendingChallenges = [];
+          progressHelpers.challengeResolved([]);
+          progressHelpers.crawlingComplete(discoveredJobs.length);
+        } else {
+          // Re-run only the extractors that had challenges
+          pipelineLogger.info("Challenges resolved, re-running extractors", {
+            sources: challengedSources,
           });
 
-          if (discoveredJobs.length === 0) {
-            throw new Error(message);
+          const retryConfig = { ...mergedConfig, sources: challengedSources };
+          const retryResult = await discoverJobsStep({
+            mergedConfig: retryConfig,
+            includeWatchlist: false,
+            shouldCancel: () =>
+              getPipelineState(scopeKey).cancelRequestedAt !== null,
+          });
+
+          discoveredJobs = [...discoveredJobs, ...retryResult.discoveredJobs];
+          sourceErrors = [...sourceErrors, ...retryResult.sourceErrors];
+          pendingChallenges = retryResult.pendingChallenges;
+
+          // If the retry itself hits challenges again (e.g. no reusable cookie
+          // was persisted, or the cookie was rejected), keep partial results
+          // only when something useful was discovered. Otherwise stop loudly
+          // instead of presenting a successful zero-job run.
+          if (retryResult.pendingChallenges.length > 0) {
+            const message = buildRepeatedChallengeMessage({
+              challenges: retryResult.pendingChallenges,
+              sourceErrors: retryResult.sourceErrors,
+            });
+
+            if (discoveredJobs.length === 0) {
+              throw new Error(message);
+            }
+
+            pipelineLogger.warn(message, {
+              retryPendingChallenges: retryResult.pendingChallenges.map(
+                (c) => c.extractorId,
+              ),
+              retrySourceErrors: retryResult.sourceErrors,
+            });
           }
 
-          pipelineLogger.warn(message, {
-            retryPendingChallenges: retryResult.pendingChallenges.map(
-              (c) => c.extractorId,
-            ),
-            retrySourceErrors: retryResult.sourceErrors,
-          });
+          progressHelpers.crawlingComplete(discoveredJobs.length);
         }
-
-        progressHelpers.crawlingComplete(discoveredJobs.length);
       }
 
       ensureNotCancelled(scopeKey);

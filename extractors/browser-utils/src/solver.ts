@@ -8,24 +8,74 @@ export type SolverResult =
   | { status: "timeout" }
   | { status: "error"; message: string };
 
-function noReusableCookiesError(): SolverResult {
+// Cloudflare frequently commits the cf_clearance cookie a beat *after* the
+// interstitial markup clears, so saving the instant the challenge visually
+// disappears can race ahead of the cookie being written. Give it a short
+// window to appear before declaring the solve unusable.
+const CLEARANCE_SETTLE_TIMEOUT_MS = 10_000;
+const CLEARANCE_POLL_INTERVAL_MS = 500;
+
+function noReusableCookiesError(detail?: string): SolverResult {
+  const base =
+    "Challenge appeared solved, but no reusable Cloudflare clearance cookie was saved.";
   return {
     status: "error",
-    message:
-      "Challenge appeared solved, but no reusable Cloudflare clearance cookie was saved.",
+    message: detail ? `${base} (${detail})` : base,
   };
 }
+
+async function hasClearanceCookie(context: BrowserContext): Promise<boolean> {
+  const cookies = await context.cookies();
+  return cookies.some((cookie) => cookie.name === "cf_clearance");
+}
+
+/** Poll the context for a cf_clearance cookie until it appears or time runs out. */
+async function waitForClearanceCookie(
+  context: BrowserContext,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = Date.now();
+  while (true) {
+    if (await hasClearanceCookie(context)) return true;
+    if (Date.now() - start >= timeoutMs) return false;
+    await new Promise((resolve) =>
+      setTimeout(resolve, CLEARANCE_POLL_INTERVAL_MS),
+    );
+  }
+}
+
+/** Human-readable summary of what cookies were present, for diagnosing a failed solve. */
+async function summarizeCookies(context: BrowserContext): Promise<string> {
+  try {
+    const cookies = await context.cookies();
+    if (cookies.length === 0) return "no cookies were set";
+    const names = Array.from(new Set(cookies.map((cookie) => cookie.name)));
+    const preview = names.slice(0, 12).join(", ");
+    const suffix = names.length > 12 ? ", …" : "";
+    return `cookies present: ${preview}${suffix}; none was a valid cf_clearance`;
+  } catch {
+    return "cookie inventory unavailable";
+  }
+}
+
+type ReusableCookieOutcome =
+  | { ok: true; cookiesSaved: number }
+  | { ok: false; detail: string };
 
 async function saveReusableCookies(
   context: BrowserContext,
   extractorId: string,
   storageDir: string,
-): Promise<number | null> {
-  const cookiesSaved = await saveCookies(context, extractorId, storageDir);
-  if (cookiesSaved === 0) return null;
+): Promise<ReusableCookieOutcome> {
+  await waitForClearanceCookie(context, CLEARANCE_SETTLE_TIMEOUT_MS);
 
-  const jar = await readCookieJar(extractorId, storageDir);
-  return jar.hasClearanceCookie ? cookiesSaved : null;
+  const cookiesSaved = await saveCookies(context, extractorId, storageDir);
+  if (cookiesSaved > 0) {
+    const jar = await readCookieJar(extractorId, storageDir);
+    if (jar.hasClearanceCookie) return { ok: true, cookiesSaved };
+  }
+
+  return { ok: false, detail: await summarizeCookies(context) };
 }
 
 const SOLVED_PAGE = `data:text/html,${encodeURIComponent(`<!DOCTYPE html>
@@ -83,14 +133,14 @@ export async function solveChallenge(
     // If there's no challenge, we're done — save cookies anyway since the
     // browser session established a valid cf_clearance
     if (!(await isChallengePage(page))) {
-      const cookiesSaved = await saveReusableCookies(
+      const outcome = await saveReusableCookies(
         context,
         extractorId,
         storageDir,
       );
-      if (cookiesSaved === null) return noReusableCookiesError();
+      if (!outcome.ok) return noReusableCookiesError(outcome.detail);
       await showSolvedPage(page);
-      return { status: "solved", cookiesSaved };
+      return { status: "solved", cookiesSaved: outcome.cookiesSaved };
     }
 
     // Poll until the challenge is resolved or timeout
@@ -101,14 +151,14 @@ export async function solveChallenge(
       await page.waitForTimeout(pollInterval);
 
       if (!(await isChallengePage(page))) {
-        const cookiesSaved = await saveReusableCookies(
+        const outcome = await saveReusableCookies(
           context,
           extractorId,
           storageDir,
         );
-        if (cookiesSaved === null) return noReusableCookiesError();
+        if (!outcome.ok) return noReusableCookiesError(outcome.detail);
         await showSolvedPage(page);
-        return { status: "solved", cookiesSaved };
+        return { status: "solved", cookiesSaved: outcome.cookiesSaved };
       }
     }
 
