@@ -14,8 +14,11 @@ services:
     ports:
       - "3005:3001"
     volumes:
-      # Persist database and generated PDFs
-      - ./data:/app/data
+      # Persist database and generated PDFs.
+      # Docker-managed named volume (not a ./data bind-mount) so the data
+      # survives redeploys on hosts that re-clone the repo on each deploy
+      # (e.g. Dokploy wipes and re-clones its code/ dir every AutoDeploy).
+      - data:/app/data
       # Persist Codex login/session data for app-server provider
       - codex-home:/app/codex-home
     environment:

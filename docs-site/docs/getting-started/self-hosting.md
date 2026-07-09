@@ -29,8 +29,11 @@ services:
     ports:
       - "3005:3001"
     volumes:
-      # Persist database and generated PDFs
-      - ./data:/app/data
+      # Persist database and generated PDFs.
+      # Docker-managed named volume (not a ./data bind-mount) so the data
+      # survives redeploys on hosts that re-clone the repo on each deploy
+      # (e.g. Dokploy wipes and re-clones its code/ dir every AutoDeploy).
+      - data:/app/data
       # Persist Codex login/session data for app-server provider
       - codex-home:/app/codex-home
     environment:
@@ -113,6 +116,7 @@ secrets:
     environment: GITHUB_TOKEN
 
 volumes:
+  data:
   codex-home:
 ```
 
@@ -244,11 +248,19 @@ flowchart TD
 
 ## Persistent data
 
-`./data` bind-mount stores:
+The `data` named volume (mounted at `/app/data`) stores:
 
 - SQLite DB: `data/jobs.db`
 - Generated PDFs: `data/pdfs/`
 - Cloudflare challenge cookies: `data/cloudflare-cookies/`
+
+A Docker-managed **named volume** is used (rather than a `./data` bind-mount)
+so this data survives redeploys. On platforms that re-clone the repository on
+every deploy — such as Dokploy, which wipes and re-clones its `code/` directory
+on each AutoDeploy — a relative bind-mount like `./data` would be recreated
+empty and the database rebuilt from scratch on every push. A named volume lives
+in Docker-managed storage outside the clone, so it persists across redeploys
+(and can be backed up via Dokploy's Volume Backups).
 
 ## Public demo mode
 
