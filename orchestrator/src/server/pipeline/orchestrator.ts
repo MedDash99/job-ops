@@ -468,6 +468,13 @@ export async function runPipeline(
 
           progressHelpers.crawlingComplete(discoveredJobs.length);
         }
+
+        // Persist the challenge-phase diagnostics (timeout / retry errors).
+        // The post-discovery write above ran before this block appended to
+        // sourceErrors, and later stage writes only carry forward whatever was
+        // last persisted — so without this, these entries never reach the
+        // stored run summary.
+        await persistResultSummary({ sourceErrors });
       }
 
       ensureNotCancelled(scopeKey);

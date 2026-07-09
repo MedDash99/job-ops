@@ -133,14 +133,7 @@ export async function solveChallenge(
     // If there's no challenge, we're done — save cookies anyway since the
     // browser session established a valid cf_clearance
     if (!(await isChallengePage(page))) {
-      const outcome = await saveReusableCookies(
-        context,
-        extractorId,
-        storageDir,
-      );
-      if (!outcome.ok) return noReusableCookiesError(outcome.detail);
-      await showSolvedPage(page);
-      return { status: "solved", cookiesSaved: outcome.cookiesSaved };
+      return finalizeSolve(page, context, extractorId, storageDir);
     }
 
     // Poll until the challenge is resolved or timeout
@@ -151,14 +144,7 @@ export async function solveChallenge(
       await page.waitForTimeout(pollInterval);
 
       if (!(await isChallengePage(page))) {
-        const outcome = await saveReusableCookies(
-          context,
-          extractorId,
-          storageDir,
-        );
-        if (!outcome.ok) return noReusableCookiesError(outcome.detail);
-        await showSolvedPage(page);
-        return { status: "solved", cookiesSaved: outcome.cookiesSaved };
+        return finalizeSolve(page, context, extractorId, storageDir);
       }
     }
 
@@ -171,6 +157,24 @@ export async function solveChallenge(
   } finally {
     await browser?.close();
   }
+}
+
+/**
+ * Save the cleared session's cookies and, if a reusable clearance cookie was
+ * persisted, show the solved page and report success. Shared by both the
+ * "no challenge present" and "challenge resolved" exit paths so they stay
+ * consistent.
+ */
+async function finalizeSolve(
+  page: Parameters<typeof showSolvedPage>[0],
+  context: BrowserContext,
+  extractorId: string,
+  storageDir: string,
+): Promise<SolverResult> {
+  const outcome = await saveReusableCookies(context, extractorId, storageDir);
+  if (!outcome.ok) return noReusableCookiesError(outcome.detail);
+  await showSolvedPage(page);
+  return { status: "solved", cookiesSaved: outcome.cookiesSaved };
 }
 
 /** Show a "challenge solved" page so the VNC user knows they can close the tab. */
